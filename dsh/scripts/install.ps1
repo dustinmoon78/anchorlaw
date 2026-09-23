@@ -1,162 +1,138 @@
-# install.ps1 — Install/sync the Anchorlaw DSH project into the DSH runtime.
+# install.ps1 — Install/sync the Anchorlaw DSH bundle into the DSH runtime.
 #
-# Two modes:
-#   Host-level (default): installs the anchorlaw preset (composition + plugin +
-#   embedded skills) to ~/.dsh/.agent-presets/anchorlaw/ and the 11 anchor-*
-#   skills to ~/.dsh/skills/ (user-global — every session sees them).
-#   Project-level (-Project <dir>): Reasonix-style per-project deployment —
-#   installs the 11 anchor-* skills to <dir>/.dsh/skills/ (DSH native
-#   project-scoped root, rank 100), so a session opened inside <dir> loads
-#   them and a session outside does not. The plugin file is also copied to
-#   <dir>/.dsh/plugins/ for future project-level plugin support; DSH currently
-#   has no project-level plugin mechanism (suggestion filed upstream:
-#   deepseek-ai/deepseek-harness discussion #306).
-#   Host-level install additionally mounts the 4 anchorlaw_* tools globally:
-#   it appends an `insert` row to <dshHome>/profiles/<profile>/cordis.patch.yml
-#   (the ONLY user patch layer DSH reads; ~/.dsh/cordis.patch.yml is ignored by
-#   the host) and copies the plugin to <profile>/plugins/anchorlaw/.
+# DSH >= 0.1.7: an agent preset is a `@deepseek-ai/dsh-agent-preset` declaration
+# row carried by a BUNDLE PATCH. The legacy directory form
+# (`$DSH_HOME/.agent-presets/<id>/`) is read by nothing — see
+# packages/preset/agent-preset/skills/editing-cordis-compositions/SKILL.md.
+#
+# This script therefore:
+#   1. verifies the bundle package in this directory (package.json + its patch)
+#   2. installs the bundle into every target profile with
+#      `dsh plugin --profile <p> add <bundle dir>` — pnpm installs it and the
+#      plugin manager appends it to the profile's ordered `dsh.profile.bundles`
+#      (reconcile() in @deepseek-ai/dsh-plugin-manager)
+#   3. copies the 11 anchor-* skills to the user-global root `~/.dsh/skills`
+#      (rank 400 — visible in every session of every project)
+#   4. mounts the 4 anchorlaw_* tools globally (a profile patch row), so every
+#      session — not only anchorlaw-preset sessions — sees them. The tools
+#      registry is layered: a preset row and this global row do not collide.
+#
+# There is NO project-level mode. DSH has no project-level plugin/preset
+# mechanism, so a project-scoped install could deliver the skills but never the
+# preset persona or the 4 tools. Project-scoped skills remain available through
+# DSH's own native root `<projectRoot>/.dsh/skills` (rank 100) — that needs no
+# installer: any preset whose `skill-filesystem` keeps `includeDefaultRoots`
+# (the default) discovers it.
 #
 # Idempotent: safe to re-run after editing any source file. Requires full file
 # access to the DSH home (outside the session workspace).
 
 param(
-  # Project directory for project-level (Reasonix-style) install.
-  [string]$Project = '',
-  # DSH profile name for the global tool mount. Empty = auto-detect every
-  # profile directory under <dshHome>/profiles holding a package.json (never a
-  # hard-coded default).
+  # DSH profile name for the bundle + global tool mount. Empty = auto-detect
+  # every profile directory under <dshHome>/profiles holding a package.json
+  # (never a hard-coded default).
   [string]$Profile = ''
 )
 
 $ErrorActionPreference = 'Stop'
 
-$srcRoot  = Split-Path -Parent $PSScriptRoot
-$dshHome  = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
-$presetDir = Join-Path $dshHome '.agent-presets\anchorlaw'
+$bundleDir  = Split-Path -Parent $PSScriptRoot          # this dsh/ subtree IS the bundle package
+$dshHome    = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
 $userSkills = Join-Path $dshHome 'skills'
 
-if ($Project) {
-  # ── Project-level install (Reasonix-style per-project deployment) ──────────
-  $proj = (Resolve-Path -Path $Project -ErrorAction Stop).ProviderPath
-  $projSkills  = Join-Path $proj '.dsh\skills'
-  $projPlugins = Join-Path $proj '.dsh\plugins'
+Write-Host "== Anchorlaw DSH bundle install =="
+Write-Host "bundle : $bundleDir"
+Write-Host "dshHome: $dshHome"
 
-  Write-Host "== Anchorlaw DSH project install =="
-  Write-Host "project : $proj"
-  Write-Host "skills  : $projSkills (project-scoped, rank 100 — visible only in this project's sessions)"
+# ── 1. Verify the bundle package (fail-closed before touching anything) ──────
+$manifestPath = Join-Path $bundleDir 'package.json'
+if (-not (Test-Path $manifestPath)) { throw "bundle manifest missing: $manifestPath" }
+$manifest = Get-Content $manifestPath -Raw | ConvertFrom-Json
+$bundleName = $manifest.name
+$patchRel = $manifest.dsh.bundle.patch
+if (-not $bundleName) { throw "$manifestPath declares no name" }
+if (-not $patchRel) { throw "$manifestPath declares no dsh.bundle.patch" }
+$patchPath = Join-Path $bundleDir $patchRel
+if (-not (Test-Path $patchPath)) { throw "bundle patch missing: $patchPath" }
+Write-Host "  OK bundle: $bundleName  patch: $patchRel"
 
-  if (-not (Test-Path (Join-Path $proj '.git'))) {
-    Write-Host "  note: $proj has no .git — DSH falls back to the session cwd as project root;"
-    Write-Host "        open sessions directly in this directory for the skills to resolve."
-  }
+# The row gate must pass before anything is installed: a bundle whose preset rows
+# do not resolve would install fine and then fail at session creation.
+node (Join-Path $bundleDir 'tests\audit_preset_rows.mjs') 2>&1
+if ($LASTEXITCODE -ne 0) { throw "preset row gate failed - refusing to install" }
 
-  # Skills → project-scoped root (<project>/.dsh/skills/anchor-*)
-  New-Item -ItemType Directory -Path $projSkills -Force | Out-Null
-  Copy-Item -Path (Join-Path $srcRoot 'skills\*') -Destination $projSkills -Recurse -Force
-
-  # Plugin file also lands in the project, ready for future project-level plugin
-  # loading (not auto-loaded by DSH today).
-  New-Item -ItemType Directory -Path $projPlugins -Force | Out-Null
-  Copy-Item -Path (Join-Path $srcRoot 'plugins\anchorlaw-tools.js') -Destination $projPlugins -Force
-
-  Write-Host ""
-  Write-Host "Installed (project-scoped):"
-  Get-ChildItem -Path $projSkills -Directory | ForEach-Object { Write-Host "  $($_.Name)" }
-  Write-Host "  plugins\anchorlaw-tools.js"
-  Write-Host ""
-  Write-Host "Next: open a DSH session in this project directory — the 11 anchor-* skills load here"
-  Write-Host "      and nowhere else. The anchorlaw_* TOOLS still come from the anchorlaw preset"
-  Write-Host "      (DSH has no project-level plugin mechanism yet; upstream suggestion:"
-  Write-Host "      deepseek-ai/deepseek-harness discussion #306)."
-  exit 0
+# ── 2. Skills → user-global root ─────────────────────────────────────────────
+$srcSkills = Join-Path $bundleDir 'skills'
+if (Test-Path $srcSkills) {
+  New-Item -ItemType Directory -Path $userSkills -Force | Out-Null
+  Copy-Item -Path (Join-Path $srcSkills '*') -Destination $userSkills -Recurse -Force
+  $n = @(Get-ChildItem $userSkills -Directory | Where-Object { $_.Name -like 'anchor-*' }).Count
+  Write-Host "  OK user skills: $userSkills ($n anchor-*)"
 }
 
-# ── Host-level install (default) ─────────────────────────────────────────────
-
-Write-Host "== Anchorlaw DSH install =="
-Write-Host "source : $srcRoot"
-Write-Host "preset : $presetDir"
-Write-Host "skills : $userSkills"
-
-# 1. Preset composition + metadata
-New-Item -ItemType Directory -Path $presetDir -Force | Out-Null
-Copy-Item -Path (Join-Path $srcRoot 'preset\agent.cordis.yml') -Destination $presetDir -Force
-Copy-Item -Path (Join-Path $srcRoot 'preset\preset.yml')       -Destination $presetDir -Force
-
-# 2. Local plugin file (travels with the preset)
-New-Item -ItemType Directory -Path (Join-Path $presetDir 'plugins') -Force | Out-Null
-Copy-Item -Path (Join-Path $srcRoot 'plugins\anchorlaw-tools.js') -Destination (Join-Path $presetDir 'plugins') -Force
-
-# 3. Skills: preset-embedded + user-global refresh
-if (Test-Path (Join-Path $srcRoot 'skills')) {
-  $presetSkills = Join-Path $presetDir 'skills'
-  Remove-Item -Path $presetSkills -Recurse -Force -ErrorAction SilentlyContinue
-  Copy-Item -Path (Join-Path $srcRoot 'skills') -Destination $presetSkills -Recurse -Force
-  Copy-Item -Path (Join-Path $srcRoot 'skills\*') -Destination $userSkills -Recurse -Force
-}
-
-# 4. Global tool mount — DSH reads ONLY a profile's own patch layer
-#    (<dshHome>/profiles/<profile>/cordis.patch.yml; baseUrl = profile dir,
-#    hot-reloaded). ~/.dsh/cordis.patch.yml is NOT read by the host. The
-#    anchorlaw plugin row is appended as an `insert` patch so the four
-#    anchorlaw_* tools are available in every session (global layer).
-#
-#    Profiles: -Profile <name> mounts one profile explicitly; otherwise EVERY
-#    profile directory under <dshHome>/profiles holding a package.json is
-#    mounted, so whichever profile the host runs, the tools are there. No
-#    profile found skips the mount with a hint — there is NO hard-coded
-#    default profile name.
-#
-#    GATE: never mount a plugin whose tool schemas are not compiled JSON
-#    Schema. A flat per-property spec (defineTool input style) is projected
-#    verbatim to the LLM without a top-level type and breaks EVERY session
-#    ("Invalid schema for function ... got 'type: null'"). The check must pass
-#    before any patch is written (2026-08-13 incident guard).
+# ── 3. Target profiles ───────────────────────────────────────────────────────
+$profilesDir = Join-Path $dshHome 'profiles'
 $mountProfiles = @()
 if ($Profile) {
   $mountProfiles = @($Profile)
-} else {
-  $profilesDir = Join-Path $dshHome 'profiles'
-  if (Test-Path $profilesDir) {
-    $mountProfiles = @(Get-ChildItem -Path $profilesDir -Directory | Where-Object {
-      $_.Name -ne 'node_modules' -and (Test-Path (Join-Path $_.FullName 'package.json'))
-    } | ForEach-Object { $_.Name })
-  }
+} elseif (Test-Path $profilesDir) {
+  $mountProfiles = @(Get-ChildItem -Path $profilesDir -Directory | Where-Object {
+    $_.Name -ne 'node_modules' -and (Test-Path (Join-Path $_.FullName 'package.json'))
+  } | ForEach-Object { $_.Name })
 }
 
 if ($mountProfiles.Count -eq 0) {
-  Write-Host "  skip global tools: no DSH profile found under $(Join-Path $dshHome 'profiles')"
-  Write-Host "        (create one with 'dsh plugin --profile <name> add <package>', then re-run install.ps1)"
+  Write-Host "  skip: no DSH profile found under $profilesDir"
+  Write-Host "        (create one with 'dsh plugin --profile <name> add <package>', then re-run)"
 } else {
-  node (Join-Path $srcRoot 'tests\check_plugin_schema.mjs') 2>&1
-  if ($LASTEXITCODE -ne 0) {
-    throw "plugin tool-schema check failed - refusing to mount global tools"
+  $dshCmd = Get-Command dsh -ErrorAction SilentlyContinue
+  if (-not $dshCmd) {
+    throw "dsh not found on PATH - the bundle is installed through 'dsh plugin --profile <p> add <dir>'"
   }
-  foreach ($profileName in $mountProfiles) {
-    $profileDir = Join-Path $dshHome "profiles\$profileName"
-    $patchPath = Join-Path $profileDir 'cordis.patch.yml'
-    $profilePluginDir = Join-Path $profileDir 'plugins\anchorlaw'
 
-    # Plugin file travels with the profile (resolved relative to baseUrl = profile dir).
-    # A sibling package.json is REQUIRED: DSH's plugin-package inventory runs
-    # nearestManifest on loose modules — without it the walk hits the profile's
-    # own manifest (official initProfile template: name but NO version) and
-    # identityFromManifest throws. With it, the nearest manifest is anchorlaw's
-    # own complete identity.
+  # The global tool mount needs a compiled-schema check FIRST: a flat
+  # per-property spec reaches the LLM without a top-level type and breaks EVERY
+  # session ("Invalid schema for function ... got 'type: null'"). 2026-08-13 guard.
+  node (Join-Path $bundleDir 'tests\check_plugin_schema.mjs') 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "plugin tool-schema check failed - refusing to mount global tools" }
+
+  foreach ($profileName in $mountProfiles) {
+    Write-Host ""
+    Write-Host "  -- profile: $profileName"
+
+    # 3a. Bundle → profile (pnpm dependency + dsh.profile.bundles entry)
+    dsh plugin --profile $profileName add $bundleDir
+    if ($LASTEXITCODE -ne 0) { throw "failed to install the bundle into profile '$profileName'" }
+    Write-Host "     OK bundle installed + selected in dsh.profile.bundles"
+
+    # 3b. Global tool mount — the plugin file travels with the profile (resolved
+    #     relative to baseUrl = profile dir). A sibling package.json is REQUIRED:
+    #     DSH's plugin-package inventory runs nearestManifest on loose modules,
+    #     and without it the walk hits the profile's own manifest (name, no
+    #     version) and identityFromManifest throws. Generated here, never hand-
+    #     maintained — the version tracks the PROTOCOL version (latest spec file).
+    $profileDir = Join-Path $profilesDir $profileName
+    $profilePluginDir = Join-Path $profileDir 'plugins\anchorlaw'
     New-Item -ItemType Directory -Path $profilePluginDir -Force | Out-Null
-    Copy-Item -Path (Join-Path $srcRoot 'plugins\anchorlaw-tools.js') -Destination (Join-Path $profilePluginDir 'anchorlaw-tools.js') -Force
-    Copy-Item -Path (Join-Path $srcRoot 'plugins\package.json') -Destination (Join-Path $profilePluginDir 'package.json') -Force
-    # The plugin package version tracks the PROTOCOL version (latest spec file) —
-    # never a hand-picked number; bumps automatically with every protocol release.
-    $specDir = Join-Path (Split-Path $srcRoot -Parent) 'spec'
+    Copy-Item -Path (Join-Path $bundleDir 'plugins\anchorlaw-tools.js') -Destination $profilePluginDir -Force
+
+    $specDir = Join-Path (Split-Path $bundleDir -Parent) 'spec'
     $protoVersion = (Get-ChildItem $specDir -Filter 'protocol-v*.md' -ErrorAction SilentlyContinue | ForEach-Object {
       if ($_.Name -match '^protocol-v(\d+)\.(\d+)\.md$') { [pscustomobject]@{ Maj = [int]$Matches[1]; Min = [int]$Matches[2] } }
     } | Sort-Object Maj, Min -Descending | Select-Object -First 1 | ForEach-Object { "$($_.Maj).$($_.Min)" })
     if (-not $protoVersion) { $protoVersion = '0.0' }
-    $pkgPath = Join-Path $profilePluginDir 'package.json'
-    (Get-Content $pkgPath -Raw) -replace '"version":\s*"[^"]*"', ('"version": "' + $protoVersion + '"') | Set-Content $pkgPath -Encoding UTF8
+    [ordered]@{
+      name        = 'anchorlaw-tools'
+      version     = $protoVersion
+      private     = $true
+      type        = 'module'   # without it Node warns MODULE_TYPELESS_PACKAGE_JSON on every boot
+      description = 'Anchorlaw protocol model tools for DSH (scan/report/ai_context/status). Generated by dsh/scripts/install.ps1 to give the loose plugin module under <profile>/plugins/anchorlaw/ a complete package identity.'
+    } | ConvertTo-Json -Depth 4 | Set-Content -Path (Join-Path $profilePluginDir 'package.json') -Encoding UTF8
 
-    # Idempotent YAML merge: drop any prior anchorlaw-tools-global insert row, then append ours.
+    # 3c. Idempotent YAML merge: drop any prior anchorlaw-tools-global insert row,
+    #     then append ours. DSH reads ONLY a profile's own patch layer
+    #     (<dshHome>/profiles/<profile>/cordis.patch.yml; baseUrl = profile dir).
+    $profilePatchPath = Join-Path $profileDir 'cordis.patch.yml'
     $py = @'
 import io, os, yaml
 path = os.environ['ANCHORLAW_PATCH_PATH']
@@ -180,24 +156,16 @@ with io.open(path, 'w', encoding='utf-8', newline='\n') as f:
 '@
     $tmpPy = Join-Path $env:TEMP 'anchorlaw-patch-merge.py'
     Set-Content -Path $tmpPy -Value $py -Encoding UTF8
-    $env:ANCHORLAW_PATCH_PATH = $patchPath
+    $env:ANCHORLAW_PATCH_PATH = $profilePatchPath
     python $tmpPy
     $mergeCode = $LASTEXITCODE
     Remove-Item $tmpPy -Force -ErrorAction SilentlyContinue
     Remove-Item Env:ANCHORLAW_PATCH_PATH -ErrorAction SilentlyContinue
-    if ($mergeCode -ne 0) { throw "failed to merge profile patch $patchPath" }
-    Write-Host "  OK global tools: $patchPath (anchorlaw-tools-global)"
+    if ($mergeCode -ne 0) { throw "failed to merge profile patch $profilePatchPath" }
+    Write-Host "     OK global tools: $profilePatchPath (anchorlaw-tools-global)"
   }
 }
 
 Write-Host ""
-Write-Host "Installed:"
-Get-ChildItem -Path $presetDir -Recurse -File | ForEach-Object { Write-Host "  $($_.FullName.Replace($presetDir, 'preset'))" }
-if ($mountProfiles.Count -gt 0) {
-  foreach ($profileName in $mountProfiles) {
-    Write-Host "  global: $(Join-Path $dshHome "profiles\$profileName\cordis.patch.yml") (anchorlaw-tools-global)"
-  }
-}
-Write-Host ""
-Write-Host "Next: run scripts/selfcheck.ps1 to verify; open a NEW session (or wait for profile hot-reload)"
-Write-Host "      and the 4 anchorlaw_* tools are available in every session."
+Write-Host "Next: run scripts/selfcheck.ps1 to verify; open a NEW session (or wait for"
+Write-Host "      profile hot-reload) and pick the 'Anchorlaw' agent preset."

@@ -20,7 +20,7 @@ pwsh dsh/scripts/selfcheck.ps1
 # 3. 新开 DSH 会话 → 每个会话都有 4 个 anchorlaw_* 工具 + 11 个 anchor-* 技能
 ```
 
-按项目安装（Reasonix 式）：`pwsh dsh/scripts/install.ps1 -Project /path/to/project`——11 个技能只在那个项目的工作区会话加载。
+按项目使用技能无需安装器：把技能放进 `<项目>/.dsh/skills/`（DSH 原生项目级根，rank 100），任何 preset 都会发现它。DSH 没有项目级插件/preset 机制，所以 `anchorlaw` preset 与 4 个工具只能是宿主级。
 
 > 工具在**新会话**出现（会话 composition 创建时固定）。全局挂载前有工具 schema 校验门禁（2026-08-13 事故门禁）——坏 schema 不可能被装进全局。
 
@@ -51,7 +51,7 @@ Judge 驱动四段流水线人格（协议 §15.4）：输入契约 → 实施�
 
 | 组件 | 位置 | 状态 |
 |------|------|------|
-| **协议正文** | `spec/protocol-v0.22.md` | 语言无关代码验证协议（当前版） |
+| **协议正文** | `spec/protocol-v0.23.md` | 语言无关代码验证协议（当前版） |
 | **Python** | `python/anchorlaw-scanner` + `python/anchorlaw` | 扫描器（已验证）+ 锚点/噪声/CLI（实验性）——DSH 工具后端 |
 | **TypeScript** | `typescript/anchorlaw-scanner` | TS/JS 扫描器（开发中） |
 
@@ -70,6 +70,8 @@ Judge 驱动四段流水线人格（协议 §15.4）：输入契约 → 实施�
 
 ### 更新日志
 
+> **v0.23 (2026-09-23):** DSH 宿主适配载体迁移——上游 DeepSeek Harness 0.1.7 换掉了 agent preset 的载体：preset 不再是 `$DSH_HOME/.agent-presets/<id>/` 目录，而是 bundle patch 里的一条 `@deepseek-ai/dsh-agent-preset` 声明行，旧目录**已无人读取**（会话头记录了这类 preset 的会话因此无法 resume）。DSH 适配层（`dsh/`）随之成为**一等 bundle 包**；其 preset 内的插件行改用**裸包名子路径**寻址（`config.plugins[]` 内的相对路径不会被锚定，且 preset 子树的 `baseUrl` 是 profile 目录而非 bundle）；11 个 anchor-* 技能改为装到用户级全局根，不再内嵌于 preset。**项目级（Reasonix 式）安装模式撤回**——DSH 没有项目级插件/preset 机制，项目级只能给技能、给不了 preset 人格与 4 个工具；项目级技能仍可通过 DSH 原生的 `<项目>/.dsh/skills` 根获得。preset 行门禁现在会走 bundle patch 载体与 `config.plugins[]`（旧实现漏检 28 行中的 27 行——这正是"自检全绿却 resume 报错"的确切原因）。协议核心不变——本次属 §16 宿主适配范围。
+>
 > **v0.22 (2026-09-15):** 验证的 temporality、判据前置集、等价档位、流程不变量——五条条款，补的都是**实践已经付过代价**的缺口（CoreSwap #156/#160/#161/#162 + M11/M16）：① **§9.8 验证的 temporality**——验证动作的 in-place 副作用 MUST 带可寻址的逆或显式不可逆声明（**只登记、不自动回滚**：失败轮证据才是更有价值的产物）；② **判据前置集**——每条判据声明它依赖的外部事实，前置失效则判据 **suspended**，且**绝不自动改任何 status**；③ **§9.7.1 等价档位**——E1 同载体 / E2 跨载体（只比双方共同声明的 key 集 `S`）/ E3 交错未知，附偏等价诚实条款与无效声明清单（该轴另起名，不复用 §9.1 能力档，避免同号不同义）；④ **§15.4 PI-1**——halt 是终止态，MUST NOT 被静默继承（PI-2 标注未验证并写明其无环前提）；⑤ **§14.7 引用完整性**——协议对自己的活引用做检查，仅限可判定层。各条款证据状态已在 §8/§11 如实登记——多数为 `scoped`，这是设计使然：**条款先立，下游才有唯一权威目标去实现、也才有东西可证伪**。
 >
 > **v0.21 (2026-09-15):** DSH 宿主适配能力补齐 + fail-closed preset 门禁——`anchorlaw` agent preset 现与上游 standard preset 的行能力面对齐（补 `command-goal`、`tool-subagent-codex`、`tool-subagent-claude-code`、`tool-ralph`、`present`；其中三个可选外部 agent/workflow 行按上游默认保持 `disabled: true`，启用需装对应 Bundle）。composition 里一个无法解析的 `name:` 会让整个 preset 挂载失败（会话无法创建/恢复），故 preset 行解析性现为 fail-closed 自检项（`dsh/tests/audit_preset_rows.mjs`，第 6 项），把上游改名/移除拦在维护时而非用户 resume 时；遗留的插件改名（`dsh-workflow-worker-thread` → `dsh-workflow-ptc`）一并关闭。协议核心不变——本次属 §16 宿主适配范围。
@@ -135,7 +137,7 @@ anchorlaw/
 │   ├── scripts/                   # install.ps1 / selfcheck.ps1
 │   └── AGENTS.md                  # DSH 维护入口
 ├── spec/
-│   └── protocol-v0.22.md          # 语言无关协议（当前版）
+│   └── protocol-v0.23.md          # 语言无关协议（当前版）
 ├── python/                        # 协议实现（DSH 工具后端）
 │   ├── anchorlaw-scanner/         # 独立扫描器（Level 1, 已验证）
 │   └── anchorlaw/                 # 锚点 / 噪声 / CLI（Level 2-4, 实验性）
@@ -162,8 +164,8 @@ anchorlaw/
 
 ## 参考
 
-- [协议规范 v0.18](spec/protocol-v0.22.md)
-- 降级验证：[协议 §9](spec/protocol-v0.22.md#9-degraded-verification-v03-draft)
+- [协议规范 v0.18](spec/protocol-v0.23.md)
+- 降级验证：[协议 §9](spec/protocol-v0.23.md#9-degraded-verification-v03-draft)
 - 唯物实践论方法论——本协议的哲学基础
 
 ---

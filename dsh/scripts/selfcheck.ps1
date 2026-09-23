@@ -12,8 +12,7 @@
 #   6. preset row resolvability via tests/audit_preset_rows.mjs — every `name:` in
 #      the composition must resolve against the harness package set; an upstream
 #      rename/removal otherwise surfaces only when a session resume fails to mount
-#      (2026-09-09 drift: dsh-workflow-worker-thread → dsh-workflow-ptc, see
-#      .investigations/dsh-upstream-drift-20260909/报告.md).
+#      (2026-09-09 drift: dsh-workflow-worker-thread → dsh-workflow-ptc).
 
 $ErrorActionPreference = 'Continue'
 
@@ -44,11 +43,26 @@ if ($LASTEXITCODE -ne 0) { Write-Host "  FAIL: ERR-level patterns in own sources
 Write-Host ""
 Write-Host "[4] installed artifacts"
 $dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
-$presetDir = Join-Path $dshHome '.agent-presets\anchorlaw'
-if (Test-Path (Join-Path $presetDir 'agent.cordis.yml')) {
-  Write-Host "  OK preset: $presetDir"
+# DSH >= 0.1.7: the preset lives in a bundle selected by the profile's ordered
+# `dsh.profile.bundles`. The legacy ~/.dsh/.agent-presets/<id>/ directory is read
+# by NOTHING — 2026-09-23 incident: it was still populated and this check still
+# passed while the preset was already unreachable.
+$bundleName = (Get-Content (Join-Path $srcRoot 'package.json') -Raw | ConvertFrom-Json).name
+$profilesDir = Join-Path $dshHome 'profiles'
+$selected = @()
+foreach ($pf in (Get-ChildItem -Path $profilesDir -Directory -ErrorAction SilentlyContinue |
+                 Where-Object { $_.Name -ne 'node_modules' -and (Test-Path (Join-Path $_.FullName 'package.json')) })) {
+  $m = Get-Content (Join-Path $pf.FullName 'package.json') -Raw | ConvertFrom-Json
+  if ($m.dsh.profile.bundles -contains $bundleName) { $selected += $pf.Name }
+}
+if ($selected.Count -gt 0) {
+  Write-Host "  OK bundle '$bundleName' selected in profile(s): $($selected -join ', ')"
 } else {
-  Write-Host "  FAIL: preset not installed — run scripts/install.ps1"; $fail = 1
+  Write-Host "  FAIL: bundle '$bundleName' not selected in any profile — run scripts/install.ps1"; $fail = 1
+}
+$legacyDir = Join-Path $dshHome '.agent-presets\anchorlaw'
+if (Test-Path $legacyDir) {
+  Write-Host "  WARN: legacy preset dir still present (read by nothing, safe to delete): $legacyDir"
 }
 $userSkills = Join-Path $dshHome 'skills'
 $count = @(Get-ChildItem -Path $userSkills -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like 'anchor-*' }).Count
